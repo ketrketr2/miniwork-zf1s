@@ -57,6 +57,7 @@ a{color:var(--blue-ink)}
 .syncbadge.on .dot{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
 .syncbadge.connecting .dot{background:#f5b301;animation:blink 1s steps(2) infinite}
 .syncbadge.error .dot,.syncbadge.unsupported .dot{background:var(--red)}
+.syncbadge.busy .dot{background:#f5b301}
 .teamswitch{display:flex;gap:4px;align-items:center;background:var(--paper2);padding:4px;border-radius:999px;border:1px solid var(--line)}
 .teamswitch button{padding:5px 13px;border-radius:999px;font-weight:700;font-size:13px;color:var(--ink2);transition:all .2s var(--ease)}
 .teamswitch button.on{background:var(--ink);color:#fff;box-shadow:var(--shadow-sm)}
@@ -195,7 +196,7 @@ a{color:var(--blue-ink)}
 .room .code{font-size:22px;letter-spacing:.2em;background:var(--ink);color:var(--hl);padding:2px 12px;border-radius:8px;margin-left:4px}
 .room .st{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink2)}
 .room .dot{width:10px;height:10px;border-radius:50%;background:#f5b301;display:inline-block}
-.room .dot.on{background:var(--ok)} .room .dot.ng{background:var(--red)}
+.room .dot.on{background:var(--ok)} .room .dot.ng{background:var(--red)} .room .dot.wait{background:#f5b301}
 .room .roombody{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
 .room .qr{background:#fff;padding:8px;border-radius:12px;border:1px solid var(--line);line-height:0}
 .warn-note{color:var(--ink2);font-size:12.5px}
@@ -579,6 +580,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const isHosted = () => /^https?:/.test(location.protocol);
 const inClaude = () => !!(window.claude && typeof window.claude.use === 'function');
+/* 中継サーバーの既定値（build.py の RELAY 環境変数で差し替え可能） */
+const DEFAULT_RELAY = 'https://ntfy.sh';
 
 const CATS = {
   pop: { label: '人口・世帯', color: '#e2323f', img: IMG.pop, desc: '高齢化・単身・空き家・家族' },
@@ -618,7 +621,7 @@ function freshTeam(id, name) {
   return { id, name, assets: [], hand: { assets: [null, null, null], change: null, updatedAt: 0 }, ideas: [], draft: null, drawMode: 'random', changeMode: 'random', focusCat: null, presentIdx: 0, updatedAt: now() };
 }
 function fresh() {
-  return { v: 2, step: 'home', activeTeam: 'A', teams: { A: freshTeam('A', 'チームA'), B: freshTeam('B', 'チームB'), C: freshTeam('C', 'チームC') }, people: [], settings: { customChanges: null, disabledCats: [], timerMin: 20, ai: { provider: 'none', key: '', model: '' }, relay: 'https://ntfy.sh', shareUrl: '' }, room: { code: null, me: null }, undo: [] };
+  return { v: 2, step: 'home', activeTeam: 'A', teams: { A: freshTeam('A', 'チームA'), B: freshTeam('B', 'チームB'), C: freshTeam('C', 'チームC') }, people: [], settings: { customChanges: null, disabledCats: [], timerMin: 20, ai: { provider: 'none', key: '', model: '' }, relay: DEFAULT_RELAY, shareUrl: '' }, room: { code: null, me: null }, undo: [] };
 }
 function migrate(s) {
   if (!s || !s.teams) return null;
@@ -635,7 +638,7 @@ function migrate(s) {
   return n;
 }
 function load() {
-  try { const raw = localStorage.getItem(KEY) || localStorage.getItem(KEY_OLD); if (!raw) return null; return migrate(JSON.parse(raw)); } catch (e) { return null; }
+  try { const raw = localStorage.getItem(KEY) || localStorage.getItem(KEY_OLD); if (!raw) return null; const s = migrate(JSON.parse(raw)); if (s && s.settings && !s.settings.relayCustom) s.settings.relay = DEFAULT_RELAY; return s; } catch (e) { return null; }
 }
 let S = load() || fresh();
 let saveT = null;
@@ -879,47 +882,88 @@ const QR = (() => {
   return { encode, svg };
 })();
 
-/* ===== ルーム同期（ntfy互換の中継サーバー経由） =====
+/* ===== ルーム同期 =====
  * 1ルーム＝1トピック。各端末は自分の変更をイベントとして送り、全端末が受け取って自分の状態に反映する。
- * 参加者の端末は保存版HTMLをWebサーバーに置いたURLから開く（Claude内の表示では通信できない）。 */
+ * 中継は2方式に対応：
+ *   (a) ntfy互換サーバー（既定 https://ntfy.sh）… POST /topic、SSE /topic/sse?since=all
+ *   (b) Firebase Realtime Database … POST /rooms/topic/ev.json、SSE /rooms/topic/ev.json（REST streaming）
+ * ntfy.sh は「同じIPからの回数制限（60回バースト→以後5〜10秒に1回）」があるため、
+ * 送信は端末ごとにまとめて間隔を空け、429 のときは指数的に待つ。 */
 const Sync = (() => {
   const clientId = uid();
-  let es = null, queue = [], timer = null, status = 'off', lastErr = '', retry = null, seen = new Set();
-  const relay = () => (S.settings.relay || 'https://ntfy.sh').replace(/\/$/, '');
+  let es = null, queue = [], timer = null, status = 'off', lastErr = '', seen = new Set();
+  let sending = false, lastSent = 0, backoffMs = 0, blockedUntil = 0, sseFails = 0, sseTimer = null;
+  const relay = () => (S.settings.relay || DEFAULT_RELAY).replace(/\/$/, '');
+  const isFirebase = () => S.settings.relayKind === 'firebase' || (S.settings.relayKind !== 'ntfy' && /firebaseio\.com|firebasedatabase\.app/.test(relay()));
   const topic = () => 'stnetcg-' + (S.room.code || '').toLowerCase();
+  const pubUrl = () => isFirebase() ? relay() + '/rooms/' + topic() + '/ev.json' : relay() + '/' + topic();
+  const subUrl = () => isFirebase() ? relay() + '/rooms/' + topic() + '/ev.json' : relay() + '/' + topic() + '/sse?since=all';
   const canUse = () => !!(window.EventSource && window.fetch) && !(location.protocol === 'about:');
+  /* 送信間隔：ntfy は端末ごと 5 秒以上空ける（IP 単位の制限対策）。Firebase は制限が緩いので短く */
+  const DEBOUNCE = 900, MIN_GAP = () => isFirebase() ? 400 : 5000, MAX_BODY = () => isFirebase() ? 24000 : 3600;
   function genCode() { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 6; i++) s += A[Math.floor(Math.random() * A.length)]; return s; }
   function connect(code) {
     if (!canUse()) { status = 'unsupported'; paint(); return; }
     S.room.code = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); save();
-    open();
+    sseFails = 0; open();
   }
+  function closeEs() { clearTimeout(sseTimer); sseTimer = null; if (es) { try { es.close(); } catch (e) { } es = null; } }
   function open() {
-    if (es) { es.close(); es = null; }
+    closeEs();
     if (!S.room.code) { status = 'off'; paint(); return; }
     status = 'connecting'; paint();
     try {
-      es = new EventSource(relay() + '/' + topic() + '/sse?since=all');
-      es.onopen = () => { status = 'on'; lastErr = ''; paint(); };
-      es.onmessage = e => {
-        try { const m = JSON.parse(e.data); if (m.event && m.event !== 'message') return; if (m.id && seen.has(m.id)) return; if (m.id) seen.add(m.id); const batch = JSON.parse(m.message); if (!batch || batch.c === clientId || !Array.isArray(batch.ev)) return; applyBatch(batch.ev); } catch (x) { }
-      };
-      es.onerror = () => { status = 'error'; lastErr = '接続できません'; paint(); };
-    } catch (e) { status = 'error'; lastErr = String(e.message || e); paint(); }
+      es = new EventSource(subUrl());
+      es.onopen = () => { status = (backoffMs ? 'busy' : 'on'); lastErr = ''; sseFails = 0; paint(); };
+      if (isFirebase()) {
+        const onPut = e => { try { const m = JSON.parse(e.data); if (!m) return; handleFb(m.path || '/', m.data); } catch (x) { } };
+        es.addEventListener('put', onPut); es.addEventListener('patch', onPut);
+        es.addEventListener('cancel', () => { lastErr = '受信が拒否されました（Firebaseのルールを確認）'; status = 'error'; paint(); });
+        es.addEventListener('auth_revoked', () => scheduleReopen());
+      } else {
+        es.onmessage = e => {
+          try { const m = JSON.parse(e.data); if (m.event && m.event !== 'message') return; if (m.id && seen.has(m.id)) return; if (m.id) seen.add(m.id); handleBatch(JSON.parse(m.message)); } catch (x) { }
+        };
+      }
+      /* ブラウザの自動再接続（約3秒）は制限に触れやすいので、自分で間隔を広げて再接続する */
+      es.onerror = () => { closeEs(); status = 'error'; lastErr = '接続できません（再接続します）'; paint(); scheduleReopen(); };
+    } catch (e) { status = 'error'; lastErr = String(e.message || e); paint(); scheduleReopen(); }
   }
-  function disconnect() { if (es) es.close(); es = null; S.room.code = null; S.room.me = null; queue = []; status = 'off'; save(); paint(); }
-  function publish(ev) { if (!S.room.code || !canUse()) return; ev.ts = ev.ts || now(); queue.push(ev); clearTimeout(timer); timer = setTimeout(flush, 700); }
+  function scheduleReopen() { if (!S.room.code) return; clearTimeout(sseTimer); const wait = Math.min(60000, 4000 * Math.pow(2, Math.min(sseFails++, 4))); sseTimer = setTimeout(open, wait); }
+  function handleFb(path, data) {
+    if (data == null) return;
+    if (path === '/' || path === '') { Object.keys(data).sort().forEach(k => { if (!seen.has(k)) { seen.add(k); handleBatch(data[k]); } }); return; }
+    const seg = path.replace(/^\//, '').split('/'); const k = seg[0];
+    if (seg.length === 1) { if (seen.has(k)) return; seen.add(k); handleBatch(data); }
+    else if (seg.length === 2 && path.startsWith('/') && seg[1] && typeof data === 'object' && !Array.isArray(data) && !seen.has(k)) { /* まれな部分更新は無視（次回の全体putで追いつく） */ }
+  }
+  function handleBatch(batch) { if (!batch || batch.c === clientId || !Array.isArray(batch.ev)) return; applyBatch(batch.ev); }
+  function disconnect() { closeEs(); S.room.code = null; S.room.me = null; queue = []; backoffMs = 0; blockedUntil = 0; status = 'off'; save(); paint(); }
+  function publish(ev) { if (!S.room.code || !canUse()) return; ev.ts = ev.ts || now(); queue.push(ev); schedule(DEBOUNCE); paint(); }
+  function schedule(minWait) {
+    clearTimeout(timer);
+    const wait = Math.max(minWait || 0, MIN_GAP() - (now() - lastSent), blockedUntil - now());
+    timer = setTimeout(flush, Math.max(0, wait));
+  }
   async function flush() {
+    if (sending) return;
     if (!queue.length || !S.room.code) return;
-    const batches = []; let cur = [];
-    for (const ev of queue) { cur.push(ev); if (JSON.stringify({ c: clientId, ev: cur }).length > 3600) { cur.pop(); batches.push(cur); cur = [ev]; } }
-    if (cur.length) batches.push(cur);
-    queue = [];
-    for (const b of batches) {
-      const body = JSON.stringify({ c: clientId, ev: b });
-      try { const r = await fetch(relay() + '/' + topic(), { method: 'POST', body, headers: { 'Content-Type': 'text/plain' } }); if (!r.ok) throw new Error('HTTP ' + r.status); if (status !== 'on') { status = 'on'; paint(); } }
-      catch (e) { queue.push(...b); status = 'error'; lastErr = '送信できません（' + (e.message || e) + '）'; paint(); clearTimeout(retry); retry = setTimeout(flush, 4000); return; }
-    }
+    if (now() < blockedUntil) { schedule(0); return; }
+    /* 先頭から上限サイズまでを1回分にまとめる（残りは次の間隔で） */
+    const cur = []; let rest = queue.slice();
+    while (rest.length) { cur.push(rest[0]); if (JSON.stringify({ c: clientId, ev: cur }).length > MAX_BODY() && cur.length > 1) { cur.pop(); break; } rest.shift(); }
+    queue = rest;
+    const body = JSON.stringify({ c: clientId, ev: cur });
+    sending = true;
+    try {
+      const r = await fetch(pubUrl(), { method: 'POST', body, headers: { 'Content-Type': isFirebase() ? 'application/json' : 'text/plain' } });
+      lastSent = now();
+      if (r.status === 429) { backoffMs = Math.min(120000, backoffMs ? backoffMs * 2 : 15000); blockedUntil = now() + backoffMs; queue = cur.concat(queue); status = 'busy'; lastErr = '中継サーバーが混み合っています。' + Math.round(backoffMs / 1000) + '秒後にまとめて送ります'; paint(); }
+      else if (r.status === 401 || r.status === 403) { queue = cur.concat(queue); blockedUntil = now() + 30000; status = 'error'; lastErr = '送信が拒否されました（HTTP ' + r.status + '）。中継サーバーの設定を確認'; paint(); }
+      else if (!r.ok) throw new Error('HTTP ' + r.status);
+      else { backoffMs = 0; blockedUntil = 0; if (status !== 'on') { status = 'on'; lastErr = ''; paint(); } }
+    } catch (e) { queue = cur.concat(queue); blockedUntil = now() + 8000; status = 'error'; lastErr = '送信できません（' + (e.message || e) + '）。再送します'; paint(); }
+    finally { sending = false; if (queue.length) schedule(0); paint(); }
   }
   function applyBatch(evs) {
     applyingRemote = true; const touched = new Set();
@@ -943,10 +987,10 @@ const Sync = (() => {
     if (!S.room.code) return;
     S.people.forEach(p => publish({ t: 'person', p }));
     teamList().forEach(t => { publish({ t: 'team', id: t.id, name: t.name }); t.assets.forEach(a => publish({ t: 'asset', team: t.id, a })); publish({ t: 'hand', team: t.id, hand: t.hand }); t.ideas.forEach(i => publish({ t: 'idea', team: t.id, idea: i })); });
-    toast('現在の状態をルームに送りました', 'ok');
+    toast('現在の状態をルームに送ります', 'ok');
   }
   function paint() { if (typeof paintSync === 'function') paintSync(); }
-  return { connect, disconnect, publish, broadcastAll, genCode, canUse, get status() { return status; }, get lastErr() { return lastErr; }, reopen: open, clientId };
+  return { connect, disconnect, publish, broadcastAll, genCode, canUse, isFirebase, get status() { return status; }, get lastErr() { return lastErr; }, get pending() { return queue.length; }, reopen: () => { sseFails = 0; open(); }, clientId };
 })();
 
 /* ===== AI相談（3経路：Claude内のsample機能 / Gemini API / Anthropic API） ===== */
@@ -1092,17 +1136,19 @@ function renderRoomPanel() {
   const st = Sync.status; const code = S.room.code;
   const hosted = isHosted();
   const shareUrl = (S.settings.shareUrl || (hosted ? location.href.split('#')[0] : '')).trim();
-  if (inClaude()) return `<div class="panel tint room"><div class="rh"><h3>スマホから参加する（任意）</h3></div><p class="small">全員が自分の端末で書き込み、リアルタイムで共有できる機能です。Claude内の表示では通信できないため、<b>保存版HTMLをWebサーバーに置いたURL</b>から使ってください。</p></div>`;
-  if (!code) return `<div class="panel tint room"><div class="rh"><h3>スマホから参加する（任意）</h3><span class="small muted">全員が自分の端末で書き込み、リアルタイムで共有できます</span></div>
-    <div class="inrow"><button class="btn primary" id="roomCreate">ルームを作る</button><button class="btn" id="roomJoin">コードで参加</button>${!hosted ? '<span class="small warn-note">このファイルをWebサーバーに置いたURLからでないと、スマホは参加できません（このPC単独では通常どおり使えます）</span>' : ''}</div></div>`;
-  const dot = st === 'on' ? '<span class="dot on"></span>接続中' : st === 'connecting' ? '<span class="dot"></span>接続しています…' : st === 'unsupported' ? '<span class="dot ng"></span>この環境では使えません' : `<span class="dot ng"></span>${esc(Sync.lastErr || '未接続')}`;
-  const joinUrl = shareUrl ? shareUrl + '#room=' + code : '';
+  if (inClaude()) return `<div class="panel tint room"><div class="rh"><h3>各自の端末から参加する（任意）</h3></div><p class="small">全員が自分のPC・スマホで書き込み、リアルタイムで共有できる機能です。Claude内の表示では通信できないため、<b>Webに置いたURL</b>から使ってください。</p></div>`;
+  if (!code) return `<div class="panel tint room"><div class="rh"><h3>各自の端末から参加する（任意）</h3><span class="small muted">全員が自分のPC・スマホで書き込み、リアルタイムで共有できます</span></div>
+    <div class="inrow"><button class="btn primary" id="roomCreate">ルームを作る</button><button class="btn" id="roomJoin">コードで参加</button>${!hosted ? '<span class="small warn-note">このファイルをWebサーバーに置いたURLからでないと、他の端末は参加できません（このPC単独では通常どおり使えます）</span>' : ''}</div></div>`;
+  const dot = st === 'on' ? '<span class="dot on"></span>接続中' : st === 'connecting' ? '<span class="dot"></span>接続しています…' : st === 'busy' ? `<span class="dot wait"></span>${esc(Sync.lastErr || '送信待ち')}` : st === 'unsupported' ? '<span class="dot ng"></span>この環境では使えません' : `<span class="dot ng"></span>${esc(Sync.lastErr || '未接続')}`;
+  const relayParam = S.settings.relayCustom && S.settings.relay && S.settings.relay !== DEFAULT_RELAY ? '&r=' + encodeURIComponent(S.settings.relay) : '';
+  const joinUrl = shareUrl ? shareUrl + '#room=' + code + relayParam : '';
   const qr = joinUrl ? `<div class="qr">${QR.svg(joinUrl, 168)}</div>` : '';
   return `<div class="panel tint room"><div class="rh"><h3>ルーム <span class="code">${esc(code)}</span></h3><span class="st">${dot}</span></div>
     <div class="roombody">${qr}<div style="flex:1;min-width:240px">
-      <p class="small">参加者はQRを読むか、URLを開いて<b>コード ${esc(code)}</b>を入れ、自分の名前とチームを選びます。</p>
-      <div class="field" style="margin:10px 0 8px"><label>参加用URL <small>Webに置いたこのファイルのURL</small></label><input class="input" id="shareUrl" value="${esc(shareUrl)}" placeholder="https://…/stnet-cardgame.html"></div>
-      <div class="inrow"><button class="btn sm" id="roomSend">今の状態を送る</button><button class="btn sm ghost" id="roomLeave">退出</button>${me() ? `<span class="tag">あなた：${esc(me().name)}</span>` : ''}</div>
+      <p class="small">参加者に<b>参加用リンク</b>をチャットで送るか、QRを読んでもらいます。開いた人は自分の名前とチームを選ぶだけです。</p>
+      ${joinUrl ? `<div class="field" style="margin:10px 0 8px"><label>参加用リンク <small>そのまま送れます</small></label><div class="inrow"><input class="input" id="joinUrl" value="${esc(joinUrl)}" readonly style="flex:1;min-width:200px"><button class="btn sm primary" id="copyJoin">リンクをコピー</button></div></div>` : ''}
+      <div class="field" style="margin:6px 0 8px"><label>このアプリのURL <small>Webに置いた場所</small></label><input class="input" id="shareUrl" value="${esc(shareUrl)}" placeholder="https://…/index.html"></div>
+      <div class="inrow"><button class="btn sm" id="roomSend">今の状態を送る</button><button class="btn sm ghost" id="roomLeave">退出</button>${me() ? `<span class="tag">あなた：${esc(me().name)}</span>` : ''}<span class="small muted">中継：${Sync.isFirebase() ? 'Firebase' : 'ntfy互換'}</span></div>
     </div></div></div>`;
 }
 function bindTeam() {
@@ -1126,6 +1172,7 @@ function bindTeam() {
   const rs = $('#roomSend'); if (rs) rs.onclick = () => Sync.broadcastAll();
   const rl = $('#roomLeave'); if (rl) rl.onclick = async () => { if (await confirmModal('ルームを退出', 'この端末をルームから切り離します（データは残ります）。', '退出する')) { Sync.disconnect(); render(); } };
   const su = $('#shareUrl'); if (su) su.onchange = () => { S.settings.shareUrl = su.value.trim(); save(); render(); };
+  const cj = $('#copyJoin'); if (cj) cj.onclick = () => { const i = $('#joinUrl'); copyText(i.value, '参加用リンクをコピーしました'); i.select(); };
 }
 function randomTeams(n) {
   const ids = []; for (let i = 0; i < n; i++) ids.push(String.fromCharCode(65 + i));
@@ -1757,9 +1804,10 @@ function paintSync() {
   const el = $('#syncbadge'); if (!el) return;
   if (!S.room.code) { el.hidden = true; return; }
   el.hidden = false; const st = Sync.status;
-  el.className = 'syncbadge ' + st; el.innerHTML = `<span class="dot"></span>ルーム ${esc(S.room.code)}${me() ? '・' + esc(me().name) : ''}`;
-  el.title = st === 'on' ? '接続中' : st === 'connecting' ? '接続しています' : (Sync.lastErr || '未接続');
-  const rs = $('.room .st'); if (rs) rs.innerHTML = st === 'on' ? '<span class="dot on"></span>接続中' : st === 'connecting' ? '<span class="dot"></span>接続しています…' : `<span class="dot ng"></span>${esc(Sync.lastErr || '未接続')}`;
+  const pend = Sync.pending ? ` <span class="small">↑${Sync.pending}</span>` : '';
+  el.className = 'syncbadge ' + st; el.innerHTML = `<span class="dot"></span>ルーム ${esc(S.room.code)}${me() ? '・' + esc(me().name) : ''}${pend}`;
+  el.title = st === 'on' ? '接続中' : st === 'connecting' ? '接続しています' : st === 'busy' ? (Sync.lastErr || '送信待ち') : (Sync.lastErr || '未接続');
+  const rs = $('.room .st'); if (rs) rs.innerHTML = st === 'on' ? '<span class="dot on"></span>接続中' : st === 'connecting' ? '<span class="dot"></span>接続しています…' : st === 'busy' ? `<span class="dot wait"></span>${esc(Sync.lastErr || '送信待ち')}` : `<span class="dot ng"></span>${esc(Sync.lastErr || '未接続')}`;
 }
 function paintStepper() {
   $('#stepper').innerHTML = STEPS.map((s, i) => { const badge = stepBadge(s.id); const done = stepDone(s.id) && s.id !== S.step && i > 0; return `<button class="step ${s.id === S.step ? 'on' : ''} ${done ? 'done' : ''}" data-go="${s.id}"><span class="n">${done ? '✓' : i}</span><span><span class="l">${s.label}</span><span class="s">${s.sub}</span></span>${badge ? `<span class="badge tnum">${badge}</span>` : ''}</button>`; }).join('');
@@ -1885,7 +1933,8 @@ function openSettings(section) {
     <h4>タイマー</h4>
     <div class="inrow"><div class="seg" id="timerSeg">${[3, 5, 10, 15, 20, 30].map(m => `<button data-min="${m}" class="${(S.settings.timerMin || 20) === m ? 'on' : ''}">${m}分</button>`).join('')}</div></div>
     <h4>ルーム（スマホ参加）</h4>
-    <div class="inrow"><span class="small">中継サーバー</span><input class="input" id="relay" value="${esc(S.settings.relay || 'https://ntfy.sh')}" style="flex:1;min-width:220px"><span class="small muted">ntfy互換。自社サーバーに変えられます</span></div>
+    <div class="inrow"><span class="small">中継サーバー</span><input class="input" id="relay" value="${esc(S.settings.relay || DEFAULT_RELAY)}" placeholder="${esc(DEFAULT_RELAY)}" style="flex:1;min-width:220px"><span class="tag" id="relayKind">${Sync.isFirebase() ? 'Firebase' : 'ntfy互換'}</span></div>
+    <p class="small muted" style="margin-top:6px">ntfy互換サーバー（例：https://ntfy.sh）または Firebase Realtime Database の URL（例：https://xxxx-default-rtdb.firebaseio.com）。空にすると既定に戻ります。参加用URLに含まれるので、進行役だけ設定すれば参加者側は自動で合わせます。</p>
     <h4>データ</h4>
     <div class="inrow"><button class="btn sm" id="expData">書き出し（コピー）</button><button class="btn sm" id="impData">読み込み（貼り付け）</button><span style="flex:1"></span><button class="btn sm warn" id="resetAllBtn">すべてリセット</button></div>
   </div>
@@ -1901,7 +1950,7 @@ function openSettings(section) {
   const cr = $('#chgReset'); if (cr) cr.onclick = () => { S.settings.customChanges = null; teamList().forEach(tm => tm.hand.change = null); save(); closeModal(); render(); toast('暫定版に戻しました'); };
   $$('input[data-cat]').forEach(i => i.onchange = () => { const s = new Set(S.settings.disabledCats || []); if (i.checked) s.delete(i.dataset.cat); else s.add(i.dataset.cat); if (s.size >= Object.keys(CATS).length) { i.checked = true; toast('最低1つは残してください', 'warn'); return; } S.settings.disabledCats = Array.from(s); i.closest('label').classList.toggle('on', i.checked); save(); });
   $$('#timerSeg button').forEach(b => b.onclick = () => { S.settings.timerMin = +b.dataset.min; $$('#timerSeg button').forEach(x => x.classList.toggle('on', x === b)); Timer.set(S.settings.timerMin); save(); });
-  $('#relay').onchange = () => { S.settings.relay = $('#relay').value.trim() || 'https://ntfy.sh'; save(); if (S.room.code) Sync.reopen(); };
+  $('#relay').onchange = () => { const v = $('#relay').value.trim().replace(/\/$/, ''); S.settings.relay = v || DEFAULT_RELAY; S.settings.relayCustom = !!v && v !== DEFAULT_RELAY; $('#relay').value = S.settings.relay; $('#relayKind').textContent = Sync.isFirebase() ? 'Firebase' : 'ntfy互換'; save(); if (S.room.code) Sync.reopen(); render(); };
   $('#expData').onclick = () => copyText(JSON.stringify(S), 'データをコピーしました');
   $('#impData').onclick = () => { modal(`<div class="mh"><h3>データを読み込む</h3><button class="iconbtn" data-close aria-label="閉じる">✕</button></div><div class="mb"><textarea class="pasteArea" id="impText" placeholder="書き出したデータを貼り付け"></textarea></div><div class="mf"><button class="btn" data-close>やめる</button><button class="btn primary" id="impOk">読み込む</button></div>`); $('#impOk').onclick = () => { try { const j = migrate(JSON.parse($('#impText').value)); if (!j) throw new Error('形式が違います'); S = j; save(); closeModal(); render(); toast('読み込みました', 'ok'); } catch (e) { toast('読み込めませんでした：' + e.message, 'warn'); } }; };
   $('#resetAllBtn').onclick = () => { closeModal(); resetAll(); };
@@ -1913,7 +1962,7 @@ function openHelp() {
     <div class="h"><b>自由に行き来</b>上の番号でどこへでも。手札やアイデアは戻っても消えません。</div>
     <div class="h"><b>間違えたら</b>右下の「戻す」。各ステップにリセット、ホームに「すべてリセット」。</div>
     <div class="h"><b>チーム切替</b>上部のA/B/C。1台で全チームを進行しても、チームごとのPCでも。</div>
-    <div class="h"><b>スマホ参加</b>チーム画面で「ルームを作る」。このHTMLをWebに置いたURLをQRで配ると、各自のスマホから書けます。</div>
+    <div class="h"><b>各自の端末から参加</b>チーム画面で「ルームを作る」→「リンクをコピー」してチャットで配ると、各自のPC・スマホから書けます。混雑時は数秒〜十数秒遅れて届きます。</div>
     <div class="h"><b>役（やく）</b>手札に法人×個人が混ざると「フュージョン」、3種で「フルハウス」。</div>
     <div class="h"><b>AIに相談</b>設定でAPIキーを入れると、アイデア画面から直接相談できます。</div>
     <div class="h"><b>発表</b>← → で送り。「発表モード」で大きく。Esc で戻る。</div>
@@ -1944,9 +1993,13 @@ function boot() {
   $('#btnSettings').onclick = () => openSettings(); $('#btnHelp').onclick = openHelp;
   $('#syncbadge').onclick = () => { S.step = 'team'; render(); };
   Timer.set(S.settings.timerMin || 20);
-  const m = location.hash.match(/room=([A-Za-z0-9]{4,10})/);
+  /* 参加用URL：#room=CODE（&r=中継サーバーURL があれば進行役の設定に合わせる） */
+  let hp = null; try { hp = new URLSearchParams(location.hash.replace(/^#\/?/, '')); } catch (e) { hp = null; }
+  const code = hp && (hp.get('room') || '').replace(/[^A-Za-z0-9]/g, '');
+  const rr = hp && (hp.get('r') || hp.get('relay') || '').trim().replace(/\/$/, '');
+  if (code && /^https?:\/\//.test(rr || '')) { S.settings.relay = rr; S.settings.relayCustom = rr !== DEFAULT_RELAY; save(); }
   render();
-  if (m) { history.replaceState(null, '', location.pathname + location.search); joinDialog(m[1].toUpperCase()); }
+  if (code && code.length >= 4) { history.replaceState(null, '', location.pathname + location.search); joinDialog(code.toUpperCase()); }
   else if (S.room.code && Sync.canUse()) Sync.reopen();
 }
 boot();
