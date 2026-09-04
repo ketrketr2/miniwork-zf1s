@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="referrer" content="no-referrer">
 <title>アセット×変化 カードゲーム</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -592,19 +594,21 @@ const CATS = {
 const DOMAINS = { corp: '法人向け', cons: '個人向け', common: '共通' };
 const DOMAIN_SHORT = { corp: '法人', cons: '個人', common: '共通' };
 const DEPTS = { corp: '法人', cons: '個人', future: 'みらい創造', hq: '統括', other: 'その他' };
-/* 参加者プリセット（キックオフ資料「チーム分けについて」より。役職はツールチップのみ：職位の垣根をなくす意図に合わせる） */
+/* 参加者プリセット（キックオフ資料「チーム分けについて」より）。
+   苗字＋部署のみを持たせる：資料の「職位の垣根をなくす」意図に合わせ、公開ファイルに氏名・役職を残さないため。
+   full / title を足せばツールチップに出る（手元だけで使う場合） */
 const PRESET_PEOPLE = [
-  { id: 'p_kashiwabara', name: '柏原', full: '柏原 丈二', dept: 'corp', title: 'ビジネス営業本部 副本部長' },
-  { id: 'p_kanda', name: '神田', full: '神田 俊司', dept: 'corp', title: 'ビジネスサービス企画部長' },
-  { id: 'p_takahashi', name: '高橋', full: '高橋 秀行', dept: 'cons', title: 'コンシューマー営業本部 コンシューマーサービス企画部長' },
-  { id: 'p_nakano', name: '中野', full: '中野 彰文', dept: 'cons', title: 'コンシューマーサービス企画部 コンシューマーサービス企画課' },
-  { id: 'p_sato', name: '佐藤', full: '佐藤 涼輔', dept: 'cons', title: 'コンシューマーサービス企画部 コンシューマーサービス企画課' },
-  { id: 'p_nishiyama', name: '西山', full: '西山 賢', dept: 'future', title: '経営企画室 みらい創造部長' },
-  { id: 'p_yamamoto', name: '山本', full: '山本 慎一郎', dept: 'future', title: 'みらい創造部 新規事業開発課長' },
-  { id: 'p_geshi', name: '下司', full: '下司 陽介', dept: 'future', title: 'みらい創造部 新規事業開発課' },
-  { id: 'p_yamaguchi', name: '山口', full: '山口 朋史', dept: 'hq', title: '経営企画室 サービス統括部' },
-  { id: 'p_takagi', name: '髙木', full: '髙木 裕子', dept: 'hq', title: 'サービス統括部 個人サービス統括課長' },
-  { id: 'p_koyama', name: '小山', full: '小山 亮資', dept: 'hq', title: 'サービス統括部 法人サービス統括課長' },
+  { id: 'p_kashiwabara', name: '柏原', dept: 'corp' },
+  { id: 'p_kanda', name: '神田', dept: 'corp' },
+  { id: 'p_takahashi', name: '高橋', dept: 'cons' },
+  { id: 'p_nakano', name: '中野', dept: 'cons' },
+  { id: 'p_sato', name: '佐藤', dept: 'cons' },
+  { id: 'p_nishiyama', name: '西山', dept: 'future' },
+  { id: 'p_yamamoto', name: '山本', dept: 'future' },
+  { id: 'p_geshi', name: '下司', dept: 'future' },
+  { id: 'p_yamaguchi', name: '山口', dept: 'hq' },
+  { id: 'p_takagi', name: '髙木', dept: 'hq' },
+  { id: 'p_koyama', name: '小山', dept: 'hq' },
 ];
 const MEMBER_COLORS = ['#1e4fa3', '#f26b1d', '#6f4bd8', '#2e9e5b', '#e2323f', '#0ca5a5', '#c2185b', '#8d6e00', '#3949ab', '#00838f', '#5d4037', '#7b1fa2'];
 const TAG_JA = {
