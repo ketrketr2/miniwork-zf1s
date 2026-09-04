@@ -621,7 +621,7 @@ function freshTeam(id, name) {
   return { id, name, assets: [], hand: { assets: [null, null, null], change: null, updatedAt: 0 }, ideas: [], draft: null, drawMode: 'random', changeMode: 'random', focusCat: null, presentIdx: 0, updatedAt: now() };
 }
 function fresh() {
-  return { v: 2, step: 'home', activeTeam: 'A', teams: { A: freshTeam('A', 'チームA'), B: freshTeam('B', 'チームB'), C: freshTeam('C', 'チームC') }, people: [], settings: { customChanges: null, disabledCats: [], timerMin: 20, ai: { provider: 'none', key: '', model: '' }, relay: DEFAULT_RELAY, shareUrl: '' }, room: { code: null, me: null }, undo: [] };
+  return { v: 2, step: 'home', activeTeam: 'A', teams: { A: freshTeam('A', 'チームA'), B: freshTeam('B', 'チームB'), C: freshTeam('C', 'チームC'), POOL: freshTeam('POOL', '全員の山札') }, people: [], settings: { customChanges: null, disabledCats: [], timerMin: 20, ai: { provider: 'none', key: '', model: '' }, relay: DEFAULT_RELAY, shareUrl: '' }, room: { code: null, me: null }, undo: [] };
 }
 function migrate(s) {
   if (!s || !s.teams) return null;
@@ -638,13 +638,20 @@ function migrate(s) {
   return n;
 }
 function load() {
-  try { const raw = localStorage.getItem(KEY) || localStorage.getItem(KEY_OLD); if (!raw) return null; const s = migrate(JSON.parse(raw)); if (s && s.settings && !s.settings.relayCustom) s.settings.relay = DEFAULT_RELAY; return s; } catch (e) { return null; }
+  try { const raw = localStorage.getItem(KEY) || localStorage.getItem(KEY_OLD); if (!raw) return null; const s = migrate(JSON.parse(raw)); if (s && s.settings && !s.settings.relayCustom) s.settings.relay = DEFAULT_RELAY; if (s && s.teams && !s.teams.POOL) s.teams.POOL = freshTeam('POOL', '全員の山札'); return s; } catch (e) { return null; }
 }
 let S = load() || fresh();
 let saveT = null;
 function save() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } }, 120); }
-const T = () => { if (!S.teams[S.activeTeam]) S.activeTeam = Object.keys(S.teams)[0]; return S.teams[S.activeTeam]; };
-const teamList = () => Object.values(S.teams).sort((a, b) => a.id.localeCompare(b.id));
+const POOL_ID = 'POOL';
+const T = () => { if (!S.teams[S.activeTeam] || S.activeTeam === POOL_ID) S.activeTeam = teamList()[0].id; return S.teams[S.activeTeam]; };
+const teamList = () => Object.values(S.teams).filter(t => t.id !== POOL_ID).sort((a, b) => a.id.localeCompare(b.id));
+/* 山札の持ち方：sharedPool=true（既定）は全員のカードを1つの山札に集め、各チームがそこから引く。false はチームごとに別の山札 */
+const sharedPool = () => S.settings.sharedPool !== false;
+function poolTeam(t) { if (!sharedPool()) return t || T(); if (!S.teams[POOL_ID]) S.teams[POOL_ID] = freshTeam(POOL_ID, '全員の山札'); return S.teams[POOL_ID]; }
+const poolLabel = t => sharedPool() ? '全員の山札' : (t || T()).name;
+/* カードを書ける・記入者に選べる人：共通山札なら全員、チーム別ならそのチームの人 */
+const poolMembers = t => sharedPool() ? S.people.slice() : teamMembers(t);
 
 /* ===== 参加者・チーム ===== */
 const teamMembers = t => S.people.filter(p => p.teamId === (t || T()).id);
@@ -660,8 +667,10 @@ function activeChanges() { const off = new Set(S.settings.disabledCats || []); r
 const changeById = id => allChanges().find(c => c.id === id) || null;
 
 /* ===== アセット ===== */
-const activeAssets = t => (t || T()).assets.filter(a => !a.mergedInto && !a.deleted);
-const assetById = (id, t) => (t || T()).assets.find(a => a.id === id) || null;
+const activeAssets = t => poolTeam(t).assets.filter(a => !a.mergedInto && !a.deleted);
+const assetById = (id, t) => { const p = poolTeam(t); let a = p.assets.find(x => x.id === id); if (!a && sharedPool()) { for (const tm of Object.values(S.teams)) { a = tm.assets.find(x => x.id === id); if (a) break; } } return a || null; };
+/* 手札に入っている（他チーム含む）カードのID */
+function handIdsAll() { const s = new Set(); Object.values(S.teams).forEach(tm => (tm.hand.assets || []).forEach(id => { if (id) s.add(id); })); return s; }
 
 /* ===== 変更の一元化（ローカル保存＋ルーム同期） ===== */
 let applyingRemote = false;
@@ -674,7 +683,7 @@ function upsertPerson(p) {
 function removePerson(id) { S.people = S.people.filter(p => p.id !== id); save(); emit({ t: 'person.del', id }); }
 function ensureTeam(id, name) { if (!S.teams[id]) S.teams[id] = freshTeam(id, name || 'チーム' + id); else if (name) S.teams[id].name = name; S.teams[id].updatedAt = now(); save(); emit({ t: 'team', id, name: S.teams[id].name }); return S.teams[id]; }
 function setAsset(t, a) {
-  t = t || T(); a.updatedAt = a.updatedAt || now();
+  t = t || poolTeam(); a.updatedAt = a.updatedAt || now();
   const i = t.assets.findIndex(x => x.id === a.id);
   if (i >= 0) { if ((t.assets[i].updatedAt || 0) > a.updatedAt) return t.assets[i]; t.assets[i] = Object.assign({}, t.assets[i], a); } else t.assets.push(a);
   save(); emit({ t: 'asset', team: t.id, a: t.assets.find(x => x.id === a.id) });
@@ -685,21 +694,23 @@ function setIdea(t, idea) { t = t || T(); idea.updatedAt = idea.updatedAt || now
 function delIdea(t, id) { t = t || T(); t.ideas = t.ideas.filter(x => x.id !== id); save(); emit({ t: 'idea.del', team: t.id, id }); }
 
 function pushUndo(label) {
-  const t = T();
-  S.undo.push({ team: t.id, label, assets: JSON.parse(JSON.stringify(t.assets)), hand: JSON.parse(JSON.stringify(t.hand)), at: now() });
+  const t = T(); const p = poolTeam();
+  const hands = {}; Object.values(S.teams).forEach(tm => { hands[tm.id] = JSON.parse(JSON.stringify(tm.hand)); });
+  S.undo.push({ team: t.id, pool: p.id, label, assets: JSON.parse(JSON.stringify(p.assets)), hands, at: now() });
   if (S.undo.length > 40) S.undo.shift();
 }
 function undo() {
   const u = S.undo.pop();
   if (!u) { toast('戻せる操作がありません'); return; }
-  const t = S.teams[u.team]; if (!t) return;
+  const p = S.teams[u.pool || u.team]; if (!p) return;
   const ts = now();
   u.assets.forEach(a => { a.updatedAt = ts; });
   // 元に戻す＝復元した状態を最新として上書き（ルームにも配信）
-  t.assets.forEach(a => { if (!u.assets.some(x => x.id === a.id)) { a.deleted = true; a.updatedAt = ts; emit({ t: 'asset', team: t.id, a }); } });
-  u.assets.forEach(a => setAsset(t, a));
-  setHand(t, Object.assign({}, u.hand, { updatedAt: ts }));
-  S.activeTeam = u.team; save(); render();
+  p.assets.forEach(a => { if (!u.assets.some(x => x.id === a.id)) { a.deleted = true; a.updatedAt = ts; emit({ t: 'asset', team: p.id, a }); } });
+  u.assets.forEach(a => setAsset(p, a));
+  const hands = u.hands || { [u.team]: u.hand };
+  Object.keys(hands).forEach(id => { const tm = S.teams[id]; if (tm) setHand(tm, Object.assign({}, hands[id], { updatedAt: ts })); });
+  if (S.teams[u.team]) S.activeTeam = u.team; save(); render();
   toast('「' + u.label + '」を取り消しました', 'ok');
 }
 
@@ -740,8 +751,11 @@ function toast(msg, kind = '', action) {
   const wrap = $('#toasts'); const el = document.createElement('div');
   el.className = 'toast ' + kind; el.innerHTML = esc(msg) + (action ? ` <button>${esc(action.label)}</button>` : '');
   if (action) $('button', el).onclick = () => { action.fn(); el.remove(); };
-  wrap.appendChild(el);
-  setTimeout(() => { el.style.transition = 'opacity .4s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, action ? 6000 : 2400);
+  /* 同じ文言が続いたら差し替え、表示は最大3件まで */
+  Array.from(wrap.children).filter(x => x.dataset.msg === msg).forEach(x => x.remove());
+  el.dataset.msg = msg; wrap.appendChild(el);
+  while (wrap.children.length > 3) wrap.firstChild.remove();
+  setTimeout(() => { el.style.transition = 'opacity .4s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, action ? 5000 : 2400);
 }
 function modal(html, { wide = false } = {}) {
   const w = $('#modalwrap');
@@ -970,10 +984,10 @@ const Sync = (() => {
     try {
       for (const ev of evs) {
         const ts = ev.ts || now();
-        if (ev.t === 'person') { const p = ev.p; if (!p || !p.id) continue; p.updatedAt = p.updatedAt || ts; const i = S.people.findIndex(x => x.id === p.id); if (i >= 0) { if ((S.people[i].updatedAt || 0) <= p.updatedAt) S.people[i] = Object.assign({}, S.people[i], p); } else { const dup = S.people.find(x => x.name === p.name && x.id !== p.id); const used = dup && teamList().some(t => t.assets.some(a => a.authorId === dup.id)); if (dup && !used) { S.people = S.people.filter(x => x.id !== dup.id); if (S.room.me === dup.id) S.room.me = p.id; } S.people.push(p); } touched.add('people'); }
+        if (ev.t === 'person') { const p = ev.p; if (!p || !p.id) continue; p.updatedAt = p.updatedAt || ts; const i = S.people.findIndex(x => x.id === p.id); if (i >= 0) { if ((S.people[i].updatedAt || 0) <= p.updatedAt) S.people[i] = Object.assign({}, S.people[i], p); } else { const dup = S.people.find(x => x.name === p.name && x.id !== p.id); const used = dup && Object.values(S.teams).some(t => t.assets.some(a => a.authorId === dup.id)); if (dup && !used) { S.people = S.people.filter(x => x.id !== dup.id); if (S.room.me === dup.id) S.room.me = p.id; } S.people.push(p); } touched.add('people'); }
         else if (ev.t === 'person.del') { S.people = S.people.filter(p => p.id !== ev.id); touched.add('people'); }
         else if (ev.t === 'team') { if (!S.teams[ev.id]) S.teams[ev.id] = freshTeam(ev.id, ev.name); else if (ev.name) S.teams[ev.id].name = ev.name; touched.add('teams'); }
-        else if (ev.t === 'asset') { const t = S.teams[ev.team]; if (!t || !ev.a || !ev.a.id) continue; const a = ev.a; a.updatedAt = a.updatedAt || ts; const i = t.assets.findIndex(x => x.id === a.id); if (i >= 0) { if ((t.assets[i].updatedAt || 0) <= a.updatedAt) t.assets[i] = Object.assign({}, t.assets[i], a); } else t.assets.push(a); touched.add('assets'); }
+        else if (ev.t === 'asset') { if (ev.team === POOL_ID && !S.teams[POOL_ID]) S.teams[POOL_ID] = freshTeam(POOL_ID, '全員の山札'); const t = S.teams[ev.team]; if (!t || !ev.a || !ev.a.id) continue; const a = ev.a; a.updatedAt = a.updatedAt || ts; const i = t.assets.findIndex(x => x.id === a.id); if (i >= 0) { if ((t.assets[i].updatedAt || 0) <= a.updatedAt) t.assets[i] = Object.assign({}, t.assets[i], a); } else t.assets.push(a); touched.add('assets'); }
         else if (ev.t === 'hand') { const t = S.teams[ev.team]; if (!t || !ev.hand) continue; if ((t.hand.updatedAt || 0) <= (ev.hand.updatedAt || ts)) t.hand = Object.assign({}, t.hand, ev.hand); touched.add('hand'); }
         else if (ev.t === 'idea') { const t = S.teams[ev.team]; if (!t || !ev.idea) continue; const i = t.ideas.findIndex(x => x.id === ev.idea.id); if (i >= 0) { if ((t.ideas[i].updatedAt || 0) <= (ev.idea.updatedAt || ts)) t.ideas[i] = ev.idea; } else t.ideas.push(ev.idea); touched.add('ideas'); }
         else if (ev.t === 'idea.del') { const t = S.teams[ev.team]; if (t) t.ideas = t.ideas.filter(x => x.id !== ev.id); touched.add('ideas'); }
@@ -987,6 +1001,7 @@ const Sync = (() => {
     if (!S.room.code) return;
     S.people.forEach(p => publish({ t: 'person', p }));
     teamList().forEach(t => { publish({ t: 'team', id: t.id, name: t.name }); t.assets.forEach(a => publish({ t: 'asset', team: t.id, a })); publish({ t: 'hand', team: t.id, hand: t.hand }); t.ideas.forEach(i => publish({ t: 'idea', team: t.id, idea: i })); });
+    if (S.teams[POOL_ID]) S.teams[POOL_ID].assets.forEach(a => publish({ t: 'asset', team: POOL_ID, a }));
     toast('現在の状態をルームに送ります', 'ok');
   }
   function paint() { if (typeof paintSync === 'function') paintSync(); }
@@ -1081,7 +1096,7 @@ const STEP_ICONS = {
   idea: '<svg width="34" height="34" viewBox="0 0 34 34" fill="none" stroke="#16202b" stroke-width="2"><path d="M17 4a9 9 0 0 0-5 16.5V24h10v-3.5A9 9 0 0 0 17 4z" fill="#fff176"/><path d="M13 27h8M14 30h6"/></svg>',
   present: '<svg width="34" height="34" viewBox="0 0 34 34" fill="none" stroke="#16202b" stroke-width="2"><rect x="3" y="5" width="28" height="18" rx="2" fill="#fff"/><path d="M17 23v6M11 30h12"/><path d="M8 18l6-6 4 4 7-7" stroke="#2962ff"/></svg>',
 };
-const STEP_DESC = { team: '参加者を登録し、ランダムに分ける', write: '各自が自社アセットを書く', merge: '似たカードを統合する', draw: 'ランダムか選んで3枚', change: '社会・生活者の変化を1枚', news: '関連しそうな記事をヒントに', idea: 'フレームに沿って書く', present: 'そのままプレゼン' };
+const STEP_DESC = { team: '参加者を登録し、ランダムに分ける', write: '全員が各自のPCで自社アセットを書く', merge: '1画面で似たカードを統合する', draw: '各チームが3枚（ランダムか選ぶ）', change: '社会・生活者の変化を1枚', news: '関連しそうな記事をヒントに', idea: 'チームに分かれてフレームに沿って書く', present: 'そのままプレゼン' };
 
 /* ===== 0. ホーム ===== */
 function renderHome() {
@@ -1231,7 +1246,7 @@ function joinStep2(code, tries) {
 /* ===== 2. 書く ===== */
 let writeAuthor = null, writeDomain = 'corp', writeFilter = 'all';
 function renderWrite() {
-  const t = T(); const list = activeAssets(t); const members = teamMembers(t);
+  const t = T(); const list = activeAssets(t); const members = poolMembers(t);
   if (me()) writeAuthor = me().id;
   if (writeAuthor && !members.some(m => m.id === writeAuthor)) writeAuthor = null;
   if (!writeAuthor && members.length) writeAuthor = members[0].id;
@@ -1240,7 +1255,7 @@ function renderWrite() {
   const filters = [['all', 'すべて'], ['corp', '法人'], ['cons', '個人'], ['common', '共通']].map(([k, v]) => `<button class="${writeFilter === k ? 'on' : ''}" data-f="${k}">${v}</button>`).join('');
   const used = new Set(list.map(a => norm(a.text)));
   const sug = shuffle(DATA.sampleAssets.filter(s => !used.has(norm(s.text)))).slice(0, 5).map(s => `<button data-sug="${esc(s.text)}" data-dom="${s.domain}">${esc(s.text)}</button>`).join('');
-  return stepHead(2, '自社アセットを書き出す', '<span class="hl">1枚に1つ</span>。重なっても気にせず、思いつくだけ。', `<span class="tag">${esc(t.name)}</span><button class="btn sm ghost" data-act="paste">一括貼り付け</button>`) + `
+  return stepHead(2, '自社アセットを書き出す', '<span class="hl">1枚に1つ</span>。重なっても気にせず、思いつくだけ。' + (sharedPool() ? '全員のカードがここに集まります。' : ''), `<span class="tag">${esc(poolLabel(t))}</span><button class="btn sm ghost" data-act="paste">一括貼り付け</button>`) + `
   <div class="inputbar">
     <div class="row who"><span class="lab">書く人</span>${chips}</div>
     <div class="row">
@@ -1254,7 +1269,7 @@ function renderWrite() {
   <div class="board" id="board">${boardHTML(list)}</div>`;
 }
 function statsHTML(list, counts) {
-  const members = teamMembers();
+  const members = poolMembers();
   const byM = members.map(m => { const n = list.filter(a => a.authorId === m.id).length; return `<span class="tag" style="background:${m.color}1a;color:${m.color}">${esc(m.name)} ${n}</span>`; }).join(' ');
   return `<span><span class="num tnum">${list.length}</span> 枚</span><span class="small muted">法人 ${counts.corp}・個人 ${counts.cons}・共通 ${counts.common}</span>${byM ? '<span class="inrow" style="gap:4px">' + byM + '</span>' : ''}`;
 }
@@ -1268,7 +1283,7 @@ function refreshBoard() {
   const s = $('#stats'); if (s) { const seg = $('#wFilter'); s.innerHTML = statsHTML(list, counts) + '<span style="flex:1"></span>'; if (seg) s.appendChild(seg); }
 }
 function addAsset(text, domain, authorId) {
-  const t = T(); text = String(text || '').trim().replace(/\s+/g, ' ');
+  const t = poolTeam(); text = String(text || '').trim().replace(/\s+/g, ' ');
   if (!text) return null;
   if (activeAssets(t).some(a => norm(a.text) === norm(text))) { toast('同じカードがすでにあります'); return null; }
   const a = { id: uid(), text, domain: domain || 'common', authorId: authorId || null, children: [], mergedInto: null, deleted: false, createdAt: now(), updatedAt: now() };
@@ -1292,22 +1307,22 @@ function bindWrite() {
   if (!('ontouchstart' in window)) setTimeout(() => input && input.focus(), 30);
 }
 function deleteCard(id) {
-  const t = T(); const a = assetById(id, t); if (!a) return;
+  const t = poolTeam(); const a = assetById(id, t); if (!a) return;
   pushUndo('削除');
   (a.children || []).forEach(cid => { const c = assetById(cid, t); if (c) setAsset(t, Object.assign(c, { mergedInto: null, updatedAt: now() })); });
   setAsset(t, Object.assign(a, { deleted: true, mergedInto: null, children: [], updatedAt: now() }));
-  if (t.hand.assets.includes(a.id)) setHand(t, { assets: t.hand.assets.map(x => x === a.id ? null : x), updatedAt: now() });
+  (sharedPool() ? teamList() : [T()]).forEach(tm => { if (tm.hand.assets.includes(a.id)) setHand(tm, { assets: tm.hand.assets.map(x => x === a.id ? null : x), updatedAt: now() }); });
   const el = $(`.card[data-id="${id}"]`); if (el) el.classList.add('out');
   setTimeout(() => render(), 250);
   toast('削除しました', '', { label: '元に戻す', fn: undo });
 }
 function editCardDialog(id) {
-  const t = T(); const a = assetById(id, t); if (!a) return;
+  const t = poolTeam(); const a = assetById(id, t); if (!a) return;
   modal(`<div class="mh"><h3>カードを編集</h3><button class="iconbtn" data-close aria-label="閉じる">✕</button></div>
   <div class="mb">
     <div class="field"><label>アセット</label><input class="input big" id="eText" value="${esc(a.text)}" maxlength="40"></div>
     <div class="field"><label>事業</label><div class="seg lg" id="eDom">${['corp', 'cons', 'common'].map(d => `<button class="${a.domain === d ? 'on ' + d : ''}" data-d="${d}">${DOMAINS[d]}</button>`).join('')}</div></div>
-    <div class="field"><label>記入者</label><div class="inrow" id="eAuth"><button class="chip ${!a.authorId ? 'on' : ''}" data-a="">なし</button>${teamMembers(t).map(m => `<button class="chip ${a.authorId === m.id ? 'on' : ''}" data-a="${m.id}">${avatarHTML(m, 20)}${esc(m.name)}</button>`).join('')}</div></div>
+    <div class="field"><label>記入者</label><div class="inrow" id="eAuth"><button class="chip ${!a.authorId ? 'on' : ''}" data-a="">なし</button>${poolMembers().map(m => `<button class="chip ${a.authorId === m.id ? 'on' : ''}" data-a="${m.id}">${avatarHTML(m, 20)}${esc(m.name)}</button>`).join('')}</div></div>
     ${a.children && a.children.length ? `<div class="field"><label>統合されているカード（${a.children.length}枚）</label><div class="hiddenchildren">${a.children.map(cid => { const c = assetById(cid, t); return c ? `<div class="c"><span>${esc(c.text)}</span><button class="btn sm" data-sep="${c.id}">1枚に戻す</button></div>` : ''; }).join('')}</div></div>` : ''}
   </div>
   <div class="mf"><button class="btn warn" id="eDel">削除</button><span style="flex:1"></span><button class="btn" data-close>やめる</button><button class="btn primary" id="eOk">保存</button></div>`);
@@ -1320,7 +1335,7 @@ function editCardDialog(id) {
   $('#eText').onkeydown = e => { if (e.key === 'Enter' && !e.isComposing) $('#eOk').click(); };
 }
 function pasteDialog() {
-  const t = T();
+  const t = T(); const teamForNew = sharedPool() ? null : t.id;
   modal(`<div class="mh"><h3>一括貼り付け</h3><button class="iconbtn" data-close aria-label="閉じる">✕</button></div>
   <div class="mb">
     <p class="small" style="margin-bottom:8px">1行に1枚。「<b>名前：</b>」を先頭に付けると記入者に、「<b>[法人]</b>」「<b>[個人]</b>」「<b>[共通]</b>」で事業に振り分けます。</p>
@@ -1335,7 +1350,7 @@ function pasteDialog() {
     lines.forEach(line => {
       let d = dom, author = writeAuthor, text = line.replace(/^[-・*•\d\.\)）]+\s*/, '');
       const dm = text.match(/[\[［【]\s*(法人|個人|共通)\s*[\]］】]/); if (dm) { d = { '法人': 'corp', '個人': 'cons', '共通': 'common' }[dm[1]]; text = text.replace(dm[0], '').trim(); }
-      const am = text.match(/^([^：:]{1,12})[：:]\s*(.+)$/); if (am) { const name = am[1].trim(); let p = S.people.find(x => x.name === name); if (!p) { p = { id: uid(), name, dept: 'other', color: nextColor(), teamId: t.id, facilitator: false, updatedAt: now() }; upsertPerson(p); } author = p.id; text = am[2].trim(); }
+      const am = text.match(/^([^：:]{1,12})[：:]\s*(.+)$/); if (am) { const name = am[1].trim(); let p = S.people.find(x => x.name === name); if (!p) { p = { id: uid(), name, dept: 'other', color: nextColor(), teamId: teamForNew, facilitator: false, updatedAt: now() }; upsertPerson(p); } author = p.id; text = am[2].trim(); }
       if (addAsset(text, d, author)) n++;
     });
     closeModal(); render(); toast(n + '枚のカードを追加しました', 'ok');
@@ -1346,11 +1361,11 @@ function pasteDialog() {
 let mergeSel = new Set();
 function renderMerge() {
   const t = T(); const list = activeAssets(t);
-  const orig = t.assets.filter(a => !a.deleted).length;
+  const orig = poolTeam(t).assets.filter(a => !a.deleted).length;
   const pairs = similarPairs(list).slice(0, 5);
   const simHTML = pairs.length ? `<div class="panel focus" style="margin-bottom:18px"><h3>似ているかも <span class="tag">${pairs.length}組</span></h3><div class="simlist">${pairs.map(p => `<div class="sim"><div class="t">${esc(p.a.text)}<small>${DOMAIN_SHORT[p.a.domain]}・${esc(memberName(p.a.authorId))}</small></div><div class="pct tnum">≈${Math.round(p.s * 100)}%</div><div class="t">${esc(p.b.text)}<small>${DOMAIN_SHORT[p.b.domain]}・${esc(memberName(p.b.authorId))}</small></div><button class="btn sm primary" data-merge="${p.a.id},${p.b.id}">統合する</button></div>`).join('')}</div></div>` : '';
   const groups = ['corp', 'cons', 'common'].map(d => { const arr = list.filter(a => a.domain === d); if (!arr.length) return ''; return `<div><div class="grouphead"><span class="tag ${d}">${DOMAINS[d]}</span><span class="cnt">${arr.length}枚</span></div><div class="board">${arr.map(a => cardHTML(a, { edit: true, cls: mergeSel.has(a.id) ? 'sel' : '' })).join('')}</div></div>`; }).join('');
-  return stepHead(3, '似たカードを統合して山札にする', '同じ意味のカードは1枚に。クリックで複数選んで統合、またはドラッグで重ねる。× で削除。', `<span class="tag">元 ${orig}枚 → 山札 <b>${list.length}枚</b></span>${me() ? '' : '<button class="btn sm ghost" data-act="unmergeAll">統合をすべて解除</button>'}`) +
+  return stepHead(3, '似たカードを統合して山札にする', '同じ意味のカードは1枚に。クリックで複数選んで統合、またはドラッグで重ねる。× で削除。', `<span class="tag">${esc(poolLabel(t))}</span><span class="tag">元 ${orig}枚 → 山札 <b>${list.length}枚</b></span>${me() ? '' : '<button class="btn sm ghost" data-act="unmergeAll">統合をすべて解除</button>'}`) +
     (list.length ? simHTML + `<div class="groupwrap" id="mergeBoard">${groups}</div>` + (mergeSel.size ? `<div class="mergebar">選択中 <b>${mergeSel.size}枚</b> <button class="btn sm primary" id="mergeSelBtn" ${mergeSel.size < 2 ? 'disabled' : ''}>この${mergeSel.size}枚を統合</button><button class="btn sm ghost" style="color:#fff" id="mergeClear">選択解除</button></div>` : '')
       : `<div class="empty"><b>カードがまだありません</b>STEP 2 でアセットを書き出してください。</div>`);
 }
@@ -1367,7 +1382,7 @@ function bindMerge() {
   enableDrag();
 }
 function mergeDialog(ids) {
-  const t = T(); const cards = ids.map(id => assetById(id, t)).filter(Boolean); if (cards.length < 2) return;
+  const t = poolTeam(); const cards = ids.map(id => assetById(id, t)).filter(Boolean); if (cards.length < 2) return;
   modal(`<div class="mh"><h3>${cards.length}枚を1枚に統合</h3><button class="iconbtn" data-close aria-label="閉じる">✕</button></div>
   <div class="mb">
     <div class="hiddenchildren" style="margin-bottom:12px">${cards.map((c, i) => `<label class="c" style="cursor:pointer"><span><input type="radio" name="rep" value="${i}" ${i === 0 ? 'checked' : ''}> ${esc(c.text)} <span class="tag ${c.domain}">${DOMAIN_SHORT[c.domain]}</span> <span class="small muted">${esc(memberName(c.authorId))}</span></span></label>`).join('')}</div>
@@ -1382,7 +1397,7 @@ function mergeDialog(ids) {
   $('#mText').onkeydown = e => { if (e.key === 'Enter' && !e.isComposing) $('#mOk').click(); };
 }
 function doMerge(ids, text, domain) {
-  const t = T(); pushUndo('統合');
+  const t = poolTeam(); pushUndo('統合');
   const cards = ids.map(id => assetById(id, t)).filter(Boolean); const parent = cards[0];
   const children = (parent.children || []).slice(); const ts = now();
   cards.slice(1).forEach(c => {
@@ -1390,14 +1405,13 @@ function doMerge(ids, text, domain) {
     setAsset(t, Object.assign(c, { children: [], mergedInto: parent.id, updatedAt: ts })); children.push(c.id);
   });
   setAsset(t, Object.assign(parent, { text, domain, children, updatedAt: ts }));
-  const hand = t.hand.assets.map(x => cards.slice(1).some(c => c.id === x) ? (t.hand.assets.includes(parent.id) ? null : parent.id) : x);
-  if (hand.join() !== t.hand.assets.join()) setHand(t, { assets: hand, updatedAt: ts });
+  (sharedPool() ? teamList() : [T()]).forEach(tm => { const hand = tm.hand.assets.map(x => cards.slice(1).some(c => c.id === x) ? (tm.hand.assets.includes(parent.id) ? null : parent.id) : x); if (hand.join() !== tm.hand.assets.join()) setHand(tm, { assets: hand, updatedAt: ts }); });
   mergeSel.clear(); render();
   const el = $(`.card[data-id="${parent.id}"]`); if (el) { el.classList.add('fuse'); FX.burstAt(el, 30); }
   toast(cards.length + '枚を統合しました', 'ok', { label: '元に戻す', fn: undo });
 }
 function unmergeAll() {
-  const t = T(); const parents = t.assets.filter(a => a.children && a.children.length && !a.deleted);
+  const t = poolTeam(); const parents = t.assets.filter(a => a.children && a.children.length && !a.deleted);
   if (!parents.length) { toast('統合されたカードはありません'); return; }
   pushUndo('統合の全解除'); const ts = now();
   parents.forEach(p => { p.children.forEach(cid => { const c = assetById(cid, t); if (c) setAsset(t, Object.assign(c, { mergedInto: null, updatedAt: ts })); }); setAsset(t, Object.assign(p, { children: [], updatedAt: ts })); });
@@ -1421,7 +1435,8 @@ function enableDrag() {
 
 /* ===== 4. めくる（アセット3枚） ===== */
 let lastYakuKey = '';
-function deckAssets(t) { t = t || T(); const inHand = new Set(t.hand.assets.filter(Boolean)); return activeAssets(t).filter(a => !inHand.has(a.id)); }
+/* 山札＝カード全体から手札を除いたもの。共通山札のときは他チームの手札にあるカードも除く（チーム間で重複しない） */
+function deckAssets(t) { t = t || T(); const inHand = sharedPool() ? handIdsAll() : new Set(t.hand.assets.filter(Boolean)); return activeAssets(t).filter(a => !inHand.has(a.id)); }
 function slotHTML(i, a, revealed = true) {
   if (!a) return `<div class="slot" data-i="${i}"><div class="phold"><div><div class="n">${i + 1}</div>アセット${i + 1}</div></div></div>`;
   return `<div class="slot" data-i="${i}"><div class="flip ${revealed ? 'back' : ''}"><div class="face f"><div class="backface"></div></div><div class="face b">${cardHTML(a)}</div></div><button class="rm" data-rm="${i}" title="手札から外す">×</button><div class="redraw"><button class="btn sm" data-redraw="${i}">引き直す</button></div></div>`;
@@ -1748,7 +1763,23 @@ function bindPresent() {
   const pe = $('#pEdit'); if (pe) pe.onclick = () => { const x = t.ideas[t.presentIdx]; if (!x) return; t.draft = { editId: x.id, title: x.title, one: x.one, who: x.who, pain: x.pain, how: x.how, use: [true, true, true], crit: (x.crit || [0, 0, 0]).slice() }; save(); go('idea'); };
   const pd = $('#pDel'); if (pd) pd.onclick = async () => { const x = t.ideas[t.presentIdx]; if (!x) return; if (await confirmModal('アイデアを削除', `「${esc(x.title)}」を削除します。`, '削除する')) { delIdea(t, x.id); t.presentIdx = Math.max(0, t.presentIdx - 1); render(); } };
   $$('[data-open]').forEach(b => b.onclick = () => { const [tid, id] = b.dataset.open.split(':'); S.activeTeam = tid; const tm = T(); tm.presentIdx = Math.max(0, tm.ideas.findIndex(i => i.id === id)); presentView = 'slide'; save(); render(); });
+  fitSlide();
 }
+/* 発表モード：文章が長くて画面に収まらないときは、スライド全体を少し縮めて1画面に収める */
+function fitSlide() {
+  const app = document.getElementById('app'); const s = $('.present .slide'); if (!s) return;
+  const canZoom = 'zoom' in s.style;
+  if (!app.classList.contains('presenting')) { if (canZoom) s.style.zoom = ''; s.style.transform = ''; return; }
+  const top = s.getBoundingClientRect().top; const avail = window.innerHeight - top - 20; if (avail < 200) return;
+  let z = 1;
+  for (let i = 0; i < 20; i++) {
+    if (canZoom) s.style.zoom = z.toFixed(2); else { s.style.transformOrigin = 'top center'; s.style.transform = `scale(${z.toFixed(2)})`; }
+    const h = s.getBoundingClientRect().height;
+    if (h <= avail || z <= 0.55) break;
+    z -= 0.025;
+  }
+}
+window.addEventListener('resize', () => { if (S.step === 'present') fitSlide(); });
 document.addEventListener('keydown', e => {
   if (S.step !== 'present' || modalOpen()) return;
   if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
@@ -1878,7 +1909,7 @@ document.addEventListener('click', async e => {
 async function resetStep() {
   const t = T();
   switch (S.step) {
-    case 'write': if (await confirmModal('カードを全部消す', `${t.name} のアセットカード ${activeAssets(t).length}枚 を消します。「戻す」で取り消せます。`, '全部消す')) { pushUndo('全削除'); const ts = now(); t.assets.filter(a => !a.deleted).forEach(a => setAsset(t, Object.assign(a, { deleted: true, mergedInto: null, children: [], updatedAt: ts }))); setHand(t, { assets: [null, null, null], updatedAt: ts }); render(); toast('カードを消しました', '', { label: '元に戻す', fn: undo }); } break;
+    case 'write': { const p = poolTeam(t); if (await confirmModal('カードを全部消す', `${poolLabel(t)} のアセットカード ${activeAssets(t).length}枚 を消します。「戻す」で取り消せます。`, '全部消す')) { pushUndo('全削除'); const ts = now(); p.assets.filter(a => !a.deleted).forEach(a => setAsset(p, Object.assign(a, { deleted: true, mergedInto: null, children: [], updatedAt: ts }))); (sharedPool() ? teamList() : [t]).forEach(tm => setHand(tm, { assets: [null, null, null], updatedAt: ts })); render(); toast('カードを消しました', '', { label: '元に戻す', fn: undo }); } break; }
     case 'merge': unmergeAll(); break;
     case 'draw': setHand(t, { assets: [null, null, null], updatedAt: now() }); lastYakuKey = ''; render(); toast('手札を空にしました'); break;
     case 'change': setHand(t, { change: null, updatedAt: now() }); render(); toast('変化カードを外しました'); break;
@@ -1930,6 +1961,8 @@ function openSettings(section) {
     <textarea id="chgText" placeholder="P1	人口・世帯	ひとり暮らし高齢者が最大勢力に	2050年に…	四国4県では…"></textarea>
     <div class="inrow" style="margin-top:8px"><button class="btn sm primary" id="chgLoad">差し替える</button><button class="btn sm" id="chgExport">現在のカードをコピー（TSV）</button>${custom ? '<button class="btn sm warn" id="chgReset">暫定版に戻す</button>' : ''}</div>
     <div class="inrow" style="margin-top:10px"><span class="small"><b>めくる分類</b></span>${Object.entries(CATS).map(([k, v]) => `<label class="chip ${off.has(k) ? '' : 'on'}"><input type="checkbox" data-cat="${k}" ${off.has(k) ? '' : 'checked'} style="display:none"><span class="tag ${k} dot">${v.label}</span></label>`).join('')}</div>
+    <h4>山札のまとめ方</h4>
+    <div class="inrow"><div class="seg" id="poolSeg"><button data-v="shared" class="${sharedPool() ? 'on' : ''}">全員で1つの山札</button><button data-v="team" class="${sharedPool() ? '' : 'on'}">チームごとに山札</button></div><span class="small muted">全員で1つ：みんなのカードを1画面に集めて整え、各チームがそこから3枚引く（チーム間で重複しない）</span></div>
     <h4>タイマー</h4>
     <div class="inrow"><div class="seg" id="timerSeg">${[3, 5, 10, 15, 20, 30].map(m => `<button data-min="${m}" class="${(S.settings.timerMin || 20) === m ? 'on' : ''}">${m}分</button>`).join('')}</div></div>
     <h4>ルーム（スマホ参加）</h4>
@@ -1949,6 +1982,7 @@ function openSettings(section) {
   $('#chgExport').onclick = () => copyText(allChanges().map(c => [c.id, CATS[c.cat].label, c.title, c.summary || '', c.shikoku || ''].join('\t')).join('\n'), '変化カードをTSVでコピーしました');
   const cr = $('#chgReset'); if (cr) cr.onclick = () => { S.settings.customChanges = null; teamList().forEach(tm => tm.hand.change = null); save(); closeModal(); render(); toast('暫定版に戻しました'); };
   $$('input[data-cat]').forEach(i => i.onchange = () => { const s = new Set(S.settings.disabledCats || []); if (i.checked) s.delete(i.dataset.cat); else s.add(i.dataset.cat); if (s.size >= Object.keys(CATS).length) { i.checked = true; toast('最低1つは残してください', 'warn'); return; } S.settings.disabledCats = Array.from(s); i.closest('label').classList.toggle('on', i.checked); save(); });
+  $$('#poolSeg button').forEach(b => b.onclick = () => { S.settings.sharedPool = b.dataset.v === 'shared'; $$('#poolSeg button').forEach(x => x.classList.toggle('on', x === b)); mergeSel.clear(); save(); render(); toast(S.settings.sharedPool ? '全員で1つの山札にしました' : 'チームごとの山札にしました', 'ok'); });
   $$('#timerSeg button').forEach(b => b.onclick = () => { S.settings.timerMin = +b.dataset.min; $$('#timerSeg button').forEach(x => x.classList.toggle('on', x === b)); Timer.set(S.settings.timerMin); save(); });
   $('#relay').onchange = () => { const v = $('#relay').value.trim().replace(/\/$/, ''); S.settings.relay = v || DEFAULT_RELAY; S.settings.relayCustom = !!v && v !== DEFAULT_RELAY; $('#relay').value = S.settings.relay; $('#relayKind').textContent = Sync.isFirebase() ? 'Firebase' : 'ntfy互換'; save(); if (S.room.code) Sync.reopen(); render(); };
   $('#expData').onclick = () => copyText(JSON.stringify(S), 'データをコピーしました');
@@ -1961,7 +1995,7 @@ function openHelp() {
     <div class="h"><b>進行の目安（20分）</b>チーム分け 2分 → 書く 5分 → 整える 3分 → めくる 2分 → 記事 1分 → アイデア 5分 → 発表 2分。</div>
     <div class="h"><b>自由に行き来</b>上の番号でどこへでも。手札やアイデアは戻っても消えません。</div>
     <div class="h"><b>間違えたら</b>右下の「戻す」。各ステップにリセット、ホームに「すべてリセット」。</div>
-    <div class="h"><b>チーム切替</b>上部のA/B/C。1台で全チームを進行しても、チームごとのPCでも。</div>
+    <div class="h"><b>山札は全員で1つ</b>「書く」「整える」は全員のカードを1つの山札に集めます（設定でチームごとにも切替可）。「めくる」以降は上部のA/B/Cでチームを切り替えて、各チームが山札から3枚引きます（チーム間で重複しません）。</div>
     <div class="h"><b>各自の端末から参加</b>チーム画面で「ルームを作る」→「リンクをコピー」してチャットで配ると、各自のPC・スマホから書けます。混雑時は数秒〜十数秒遅れて届きます。</div>
     <div class="h"><b>役（やく）</b>手札に法人×個人が混ざると「フュージョン」、3種で「フルハウス」。</div>
     <div class="h"><b>AIに相談</b>設定でAPIキーを入れると、アイデア画面から直接相談できます。</div>
