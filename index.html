@@ -591,7 +591,21 @@ const CATS = {
 };
 const DOMAINS = { corp: '法人向け', cons: '個人向け', common: '共通' };
 const DOMAIN_SHORT = { corp: '法人', cons: '個人', common: '共通' };
-const DEPTS = { corp: '法人', cons: '個人', future: '未来創造', hq: '統括', other: 'その他' };
+const DEPTS = { corp: '法人', cons: '個人', future: 'みらい創造', hq: '統括', other: 'その他' };
+/* 参加者プリセット（キックオフ資料「チーム分けについて」より。役職はツールチップのみ：職位の垣根をなくす意図に合わせる） */
+const PRESET_PEOPLE = [
+  { id: 'p_kashiwabara', name: '柏原', full: '柏原 丈二', dept: 'corp', title: 'ビジネス営業本部 副本部長' },
+  { id: 'p_kanda', name: '神田', full: '神田 俊司', dept: 'corp', title: 'ビジネスサービス企画部長' },
+  { id: 'p_takahashi', name: '高橋', full: '高橋 秀行', dept: 'cons', title: 'コンシューマー営業本部 コンシューマーサービス企画部長' },
+  { id: 'p_nakano', name: '中野', full: '中野 彰文', dept: 'cons', title: 'コンシューマーサービス企画部 コンシューマーサービス企画課' },
+  { id: 'p_sato', name: '佐藤', full: '佐藤 涼輔', dept: 'cons', title: 'コンシューマーサービス企画部 コンシューマーサービス企画課' },
+  { id: 'p_nishiyama', name: '西山', full: '西山 賢', dept: 'future', title: '経営企画室 みらい創造部長' },
+  { id: 'p_yamamoto', name: '山本', full: '山本 慎一郎', dept: 'future', title: 'みらい創造部 新規事業開発課長' },
+  { id: 'p_geshi', name: '下司', full: '下司 陽介', dept: 'future', title: 'みらい創造部 新規事業開発課' },
+  { id: 'p_yamaguchi', name: '山口', full: '山口 朋史', dept: 'hq', title: '経営企画室 サービス統括部' },
+  { id: 'p_takagi', name: '髙木', full: '髙木 裕子', dept: 'hq', title: 'サービス統括部 個人サービス統括課長' },
+  { id: 'p_koyama', name: '小山', full: '小山 亮資', dept: 'hq', title: 'サービス統括部 法人サービス統括課長' },
+];
 const MEMBER_COLORS = ['#1e4fa3', '#f26b1d', '#6f4bd8', '#2e9e5b', '#e2323f', '#0ca5a5', '#c2185b', '#8d6e00', '#3949ab', '#00838f', '#5d4037', '#7b1fa2'];
 const TAG_JA = {
   'population-decline': '人口減少', elderly: '高齢者', 'single-household': '単身世帯', akiya: '空き家', 'digital-legacy': 'デジタル遺産', 'youth-outflow': '若者流出', 'foreign-residents': '外国人住民', childcare: '子育て', caregiving: '介護', 'family-diversity': '家族の多様化', mimamori: '見守り', 'remote-work': 'リモート', telemedicine: '遠隔医療', mobile: 'モバイル', 'home-network': '宅内ネット', security: 'セキュリティ', fraud: '詐欺対策', 'data-center': 'データセンター', cloud: 'クラウド', 'customer-data': '顧客データ', 'field-support': '訪問サポート', smb: '中小企業', regional: '地域', gov: '自治体', iot: 'IoT', 'gen-ai': '生成AI', 'energy-data': '電力データ', 'smart-meter': 'スマートメーター', disaster: '防災', 'public-transport': '公共交通', logistics: '物流', 'labor-shortage': '人手不足', tourism: '観光', succession: '事業承継', 'cyber-attack': 'サイバー攻撃', inbound: 'インバウンド', automation: '省人化', 'cost-of-living': '物価高', 'energy-price': '電気代', finance: '金融', cashless: 'キャッシュレス', network: 'ネットワーク', fiber: '光回線', billing: '課金・決済', drone: 'ドローン', autonomous: '自動運転', 'edge-ai': 'エッジAI', satellite: '衛星通信', 'resilience-comm': '災害時通信', 'digital-id': 'デジタルID', renewable: '再エネ', earthquake: '地震', flood: '豪雨', heat: '猛暑', agriculture: '農業', water: '水', storage: '蓄電池', vpp: 'VPP', 'compact-city': 'コンパクトシティ', infrastructure: 'インフラ維持', 'vacant-store': '空き店舗', wildlife: '獣害', 'regional-brand': '地域ブランド', 'art-festival': '芸術祭', household: '世帯', b2b: '法人', si: 'システム開発', brand: 'ブランド', talent: '人材', catv: 'CATV', media: 'メディア', 'physical-infra': '設備', operations: '運用', education: '教育',
@@ -1122,7 +1136,7 @@ function bindHome() { }
 /* ===== 1. チーム ===== */
 let teamCount = 3;
 function personChip(p, o = {}) {
-  return `<span class="member ${p.facilitator ? 'fac' : ''}" data-pid="${p.id}" title="${esc(DEPTS[p.dept] || '')}"><span class="av" style="background:${p.color}">${esc(p.name.slice(0, 1))}</span>${esc(p.name)}${o.move ? '' : `<span class="dp">${DEPTS[p.dept] || ''}${p.facilitator ? '・進行' : ''}</span>`}${o.move ? `<button class="mv" data-move="${p.id}" title="別のチームへ">⇄</button>` : ''}<button class="x" data-act="rmPerson" data-id="${p.id}" title="削除">×</button></span>`;
+  return `<span class="member ${p.facilitator ? 'fac' : ''}" data-pid="${p.id}" title="${esc([p.full || p.name, DEPTS[p.dept] || '', p.title || ''].filter(Boolean).join('｜'))}"><span class="av" style="background:${p.color}">${esc(p.name.slice(0, 1))}</span>${esc(p.name)}${o.move ? '' : `<span class="dp">${DEPTS[p.dept] || ''}${p.facilitator ? '・進行' : ''}</span>`}${o.move ? `<button class="mv" data-move="${p.id}" title="別のチームへ">⇄</button>` : ''}<button class="x" data-act="rmPerson" data-id="${p.id}" title="削除">×</button></span>`;
 }
 function renderTeam() {
   const people = S.people;
@@ -1135,7 +1149,8 @@ function renderTeam() {
     <div class="panel">
       <h3>参加者 <span class="tag">${people.length}人</span></h3>
       <div class="inrow"><input class="input big" id="pName" placeholder="名前（「、」区切りで複数OK）" style="flex:1;min-width:200px"><div class="seg" id="pDept">${Object.entries(DEPTS).map(([k, v], i) => `<button data-v="${k}" class="${i === 0 ? 'on' : ''}">${v}</button>`).join('')}</div><button class="btn primary" id="addPerson">追加</button></div>
-      <div class="members" style="margin-top:14px">${people.map(p => personChip(p)).join('') || '<span class="muted">例）山口、髙木、小山、柏原、神田、高橋、中野、佐藤、西山、山本、下司</span>'}</div>
+      <div class="inrow" style="margin-top:10px"><button class="btn sm" id="presetPeople" ${PRESET_PEOPLE.every(q => people.some(p => p.id === q.id || p.name === q.name)) ? 'disabled' : ''}>資料の参加者11名を読み込む</button><span class="small muted">法人2・個人3・みらい創造3・統括3（キックオフ資料より）</span></div>
+      <div class="members" style="margin-top:14px">${people.map(p => personChip(p)).join('') || '<span class="muted">まだ登録がありません。上のボタンで資料の参加者を読み込むか、名前を入力してください。</span>'}</div>
       ${people.length ? '<p class="small muted" style="margin-top:8px">名前をクリックすると「進行役（チームに入らない）」を切り替えられます。</p>' : ''}
     </div>
     <div class="panel">
@@ -1176,6 +1191,7 @@ function bindTeam() {
     render(); toast(n + '人を追加しました', 'ok'); setTimeout(() => { const i = $('#pName'); if (i) i.focus(); }, 30);
   };
   $('#addPerson').onclick = add; $('#pName').onkeydown = e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); add(); } };
+  const pp = $('#presetPeople'); if (pp) pp.onclick = () => { let n = 0; PRESET_PEOPLE.forEach((q, i) => { if (S.people.some(p => p.id === q.id || p.name === q.name)) return; upsertPerson({ id: q.id, name: q.name, full: q.full, dept: q.dept, title: q.title, color: MEMBER_COLORS[i % MEMBER_COLORS.length], teamId: null, facilitator: false, updatedAt: now() }); n++; }); render(); toast(n ? n + '人を読み込みました。「ランダムに分ける」で3チームに' : '全員すでに登録されています', 'ok'); };
   $$('#tCount button').forEach(b => b.onclick = () => { teamCount = +b.dataset.n; render(); });
   $('#shuffleTeams').onclick = () => { randomTeams(teamCount); render(); FX.celebrate(); toast('チームを分けました。気になる人は ⇄ で入れ替えられます', 'ok'); };
   $('#clearTeams').onclick = () => { S.people.forEach(p => { if (p.teamId) upsertPerson(Object.assign(p, { teamId: null, updatedAt: now() })); }); render(); };
@@ -2005,8 +2021,7 @@ function openHelp() {
 
 /* ===== デモデータ ===== */
 function loadDemo() {
-  const names = [['山口', 'hq'], ['髙木', 'hq'], ['小山', 'hq'], ['柏原', 'corp'], ['神田', 'corp'], ['高橋', 'cons'], ['中野', 'cons'], ['佐藤', 'cons'], ['西山', 'future'], ['山本', 'future'], ['下司', 'future']];
-  S.people = []; names.forEach(([n, d], i) => upsertPerson({ id: uid(), name: n, dept: d, color: MEMBER_COLORS[i % MEMBER_COLORS.length], teamId: null, facilitator: false, updatedAt: now() }));
+  S.people = []; PRESET_PEOPLE.forEach((q, i) => upsertPerson({ id: q.id, name: q.name, full: q.full, dept: q.dept, title: q.title, color: MEMBER_COLORS[i % MEMBER_COLORS.length], teamId: null, facilitator: false, updatedAt: now() }));
   randomTeams(3);
   const t = S.teams.A; S.activeTeam = 'A'; const members = teamMembers(t);
   t.assets = []; const src = DATA.sampleAssets.slice(0, 18);
